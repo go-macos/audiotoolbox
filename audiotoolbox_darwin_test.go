@@ -665,3 +665,73 @@ var sineAAC = [][]byte{
 		0x80, 0x00, 0x01, 0xc4, 0x25, 0x70, 0xe4, 0x0e,
 	},
 }
+
+// opusHead is the identification header an Opus track carries, which is what
+// Config.CodecConfig holds for one and what the demuxer hands over.
+func opusHead(channels int) []byte {
+	h := append([]byte("OpusHead"), 1, byte(channels))
+	h = binary.LittleEndian.AppendUint16(h, 312) // pre-skip, the usual value
+	h = binary.LittleEndian.AppendUint32(h, 48000)
+	h = binary.LittleEndian.AppendUint16(h, 0) // output gain
+	return append(h, 0)                        // mapping family 0
+}
+
+// TestRealOpusDecode proves the Opus path with no Opus media anywhere, which is
+// the only way it can be proved here: nothing on a Mac or on a runner encodes
+// Opus, so there is no test file to make.
+//
+// What makes it possible is RFC 6716: a packet that is nothing but its TOC byte
+// carries one frame of length zero, which is legal and decodes as silence for
+// the duration the TOC states. 0xf8 is CELT-only, fullband, 20 ms — 960 frames
+// at 48 kHz — and the decoder producing exactly that is the framing, the rate
+// and the channel layout all confirmed at once.
+//
+// What this does NOT prove is that a real Opus bitstream decodes to the right
+// samples. That needs a real Opus file, and TestLiveDecode is where it would
+// run.
+func TestRealOpusDecode(t *testing.T) {
+	for _, channels := range []int{1, 2} {
+		cfg := Config{Codec: Opus, SampleRate: 48000, Channels: channels,
+			CodecConfig: opusHead(channels)}
+		dec, err := NewDecoder(cfg)
+		if err != nil {
+			t.Skipf("%d ch: this macOS has no Opus converter: %v", channels, err)
+		}
+		if refused := dec.CodecConfigRefused(); refused != nil {
+			t.Logf("%d ch: the OpusHead was turned down: %v", channels, refused)
+		}
+		// The stereo bit of the TOC has to agree with the channel count, or
+		// the decoder is being told two different things.
+		toc := byte(0xf8)
+		if channels == 2 {
+			toc |= 0x04
+		}
+		// The first packet is short by the pre-skip the header states, which
+		// the decoder discards; every one after it is a whole frame.
+		for i := 0; i < 4; i++ {
+			buf, err := dec.Decode(Packet{Data: []byte{toc}})
+			if err != nil {
+				t.Fatalf("%d ch: packet %d: %v", channels, i, err)
+			}
+			if i == 0 {
+				t.Logf("%d ch: the first packet gave %d frames, the pre-skip taken off",
+					channels, buf.Frames)
+				continue
+			}
+			if buf.Frames != 960 {
+				t.Errorf("%d ch: packet %d gave %d frames, want 960 — a 20 ms Opus frame at "+
+					"48 kHz", channels, i, buf.Frames)
+			}
+			if buf.Channels != channels {
+				t.Errorf("%d ch: packet %d came back with %d channels", channels, i, buf.Channels)
+			}
+			if got, want := len(buf.PCM), buf.Frames*channels*2; got != want {
+				t.Errorf("%d ch: packet %d holds %d bytes, want %d", channels, i, got, want)
+			}
+			if got := buf.Duration(); got != 20*time.Millisecond {
+				t.Errorf("%d ch: packet %d lasts %v, want 20ms", channels, i, got)
+			}
+		}
+		dec.Close()
+	}
+}

@@ -56,7 +56,7 @@ $ auprobe -for 5s "The.Addams.Family.2.2021.mkv"
 
 | | |
 |---|---|
-| Codecs in | AAC (`mp4a`, LC / HE / HE v2), AC-3 (`ac-3`), Enhanced AC-3 (`ec-3`), Opus |
+| Codecs in | AAC (`mp4a`, LC / HE / HE v2), AC-3 (`ac-3`), Enhanced AC-3 (`ec-3`), [Opus](#opus-and-what-has-not-been-proved) |
 | Input | one coded packet at a time — an AAC access unit, an AC-3 sync frame |
 | Output | interleaved PCM, `Int16` or `Float32`, at the coded rate |
 | Downmix | `Config.OutputChannels` asks the decoder for fewer, so 5.1 reaches two speakers |
@@ -89,6 +89,35 @@ Before that fix a three-second decode reported 2.938 s played; after it, 3.001 s
 it plays silence and the clock goes on advancing. That is right for a master
 clock, which must not stall, and `Player.Queued` is what says whether there is
 anything left to hear.
+
+## Why AudioQueue and not AudioUnit
+
+Both were on the table; `AudioQueue` won on three counts, and none of them is
+"it was easier".
+
+**It calls back on a thread of its own.** Asked for a nil run loop, `AudioQueue`
+runs its own; an output `AudioUnit` renders on a real-time thread whose callback
+must never allocate, never take a lock and never block — which a Go callback
+reached through purego cannot promise, because the Go runtime may preempt it or
+grow its stack. A render callback that misses its deadline is a click the
+listener hears.
+
+**It buffers, so `Write` can block.** The queue holds a quarter of a second in
+front of the device, so a decode loop is paced by the output rather than by a
+`time.Sleep` on a guess, and a decode that stalls briefly is not heard. An
+`AudioUnit` pulls exactly what the device asks for, exactly when it asks, and
+the caller has to build that buffering itself — a ring buffer, a producer
+lock, and the same clock this gets for free.
+
+**It has the clock.** `AudioQueueGetCurrentTime` reports the device's own
+timeline directly. An `AudioUnit` gives an `AudioTimeStamp` to its render
+callback and leaves the caller to keep the running total, which is one more
+thing to get wrong in the one number a player cannot afford to have wrong.
+
+The cost is latency: a quarter of a second is far too much for a synthesiser or
+a game, and either would want the `AudioUnit`. For playing a film it is
+invisible, and `PlayerConfig.BufferFrames` and `BufferCount` shorten it for a
+caller who wants a faster response to a seek.
 
 ## The format is stated, never sniffed
 
@@ -159,22 +188,48 @@ states, over an hour and a half.
 ### Against Apple's own decoder
 
 A decoder nobody can check is a decoder nobody should trust, and a report of
-"it plays" is worth nothing to a reader who cannot hear it. So the whole of both
-tracks was decoded here and by `afconvert`, and the samples compared:
+"it plays" is worth nothing to a reader who cannot hear it. So whole tracks were
+decoded here and by `afconvert`, and the samples compared:
 
 | | samples compared | identical | largest difference |
 |---|---|---|---|
-| AAC, MP4 | 24 760 320 | 99.9858 % | **1** (of 32 767) |
 | AC-3 5.1, **MKV** | 27 646 272 | **100.0000 %** | 0 |
+| AAC-LC 2.0, MP4 | 24 760 320 | 99.986 % – 100 % | **1** (of 32 767) |
+| AAC-LC 1.0, MP4 | 24 000 | **100.0000 %** | 0 |
 
-The AC-3 track is bit-for-bit Apple's output. The AAC track differs on 3 520
-samples of 24.7 million, every one of them by exactly one least-significant bit,
-which is rounding and not decoding. Ours also runs 1024 frames — one AAC frame —
-longer, because `afconvert` trims the encoder's last frame to the duration the
-container states and this hands back everything the decoder produced.
+The AC-3 track is bit-for-bit Apple's output, on every run.
+
+The AAC figure is a range on purpose, and the reason is worth writing down:
+**AudioToolbox's own AAC decoder is not bit-reproducible between processes.**
+Three runs of the same decode against the same `afconvert` output gave
+99.9858 %, 100.0000 % and 99.9987 %; two runs compared against *each other* vary
+the same way. Every difference, in every direction, is exactly one
+least-significant bit of the final rounding to 16 bits. So the honest claim is
+not "identical" but "within one LSB of Apple on every one of 24.7 million
+samples" — and anyone quoting a single 100 % run of an AAC decode has measured
+it once.
+
+Ours also runs 1024 frames — one AAC frame — longer than `afconvert`'s, because
+`afconvert` trims the encoder's last frame to the duration the container states
+and this hands back everything the decoder produced. The mono comparison
+likewise allows for the 2112 frames of encoder priming, and is exact after it.
 
 `afconvert` cannot open the MKV at all; what it was given was the AC-3
 elementary stream this fleet's demuxer produced, which is the honest comparison.
+
+### Opus, and what has not been proved
+
+macOS 26.6.2 builds an Opus converter, and the framing is confirmed with no Opus
+media anywhere: RFC 6716 says a packet that is nothing but its TOC byte carries
+one frame of length zero, which is legal, so `0xf8` — CELT-only, fullband,
+20 ms — must decode to exactly 960 frames at 48 kHz, and does, mono and stereo,
+after the pre-skip the `OpusHead` states. Rate, framing and channel layout all
+confirmed at once.
+
+What that does **not** prove is that a real Opus bitstream decodes to the right
+samples. Nothing on a Mac encodes Opus, so there was no file to check against —
+`TestLiveDecode` is where it would run, and it has not been run on Opus. Treat
+Opus here as wired up and framed correctly, not as measured.
 
 ## `cmd/auprobe`
 
@@ -208,8 +263,9 @@ a Goertzel filter rather than described: 1 kHz comes back at 16 230 of full
 scale and 6.5 kHz at 5. A decoder that is silently wrong (wrong channel count,
 wrong rate, samples read at the wrong width) cannot pass that, and it needs no
 media on the runner. A real `AudioQueue` is opened, written to, clocked and
-drained, and skips itself on a machine with no output device. The end-to-end
-decode is opt-in:
+drained, and skips itself on a machine with no output device. A real Opus
+converter decodes a bare TOC byte to the 960 frames RFC 6716 says it must. The
+end-to-end decode is opt-in:
 
 ```
 AUDIOTOOLBOX_TEST_FILE=/path/to/movie.mkv go test -race ./...

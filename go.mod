@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/ebitengine/purego v0.10.2
-	github.com/go-avkit/avkit v0.0.0-20260824103714-359a605f5001
+	github.com/go-avkit/avkit v0.0.0-20260824183509-855ca19fa702
 )
 
 require (
