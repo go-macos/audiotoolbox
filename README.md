@@ -90,6 +90,35 @@ it plays silence and the clock goes on advancing. That is right for a master
 clock, which must not stall, and `Player.Queued` is what says whether there is
 anything left to hear.
 
+## Why AudioQueue and not AudioUnit
+
+Both were on the table; `AudioQueue` won on three counts, and none of them is
+"it was easier".
+
+**It calls back on a thread of its own.** Asked for a nil run loop, `AudioQueue`
+runs its own; an output `AudioUnit` renders on a real-time thread whose callback
+must never allocate, never take a lock and never block — which a Go callback
+reached through purego cannot promise, because the Go runtime may preempt it or
+grow its stack. A render callback that misses its deadline is a click the
+listener hears.
+
+**It buffers, so `Write` can block.** The queue holds a quarter of a second in
+front of the device, so a decode loop is paced by the output rather than by a
+`time.Sleep` on a guess, and a decode that stalls briefly is not heard. An
+`AudioUnit` pulls exactly what the device asks for, exactly when it asks, and
+the caller has to build that buffering itself — a ring buffer, a producer
+lock, and the same clock this gets for free.
+
+**It has the clock.** `AudioQueueGetCurrentTime` reports the device's own
+timeline directly. An `AudioUnit` gives an `AudioTimeStamp` to its render
+callback and leaves the caller to keep the running total, which is one more
+thing to get wrong in the one number a player cannot afford to have wrong.
+
+The cost is latency: a quarter of a second is far too much for a synthesiser or
+a game, and either would want the `AudioUnit`. For playing a film it is
+invisible, and `PlayerConfig.BufferFrames` and `BufferCount` shorten it for a
+caller who wants a faster response to a seek.
+
 ## The format is stated, never sniffed
 
 A `Config` says what the packets hold, the way `videotoolbox` takes its
