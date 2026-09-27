@@ -121,6 +121,67 @@ type audioTimeStamp struct {
 	Reserved      uint32
 }
 
+// ⛔⛔ THE LAYOUTS ARE PINNED AT COMPILE TIME, not described in a comment.
+//
+// Every struct above mirrors one CoreAudio fills in, and each carries its size
+// in prose -- "56 bytes", "64 bytes, of which this reads", "16 bytes, four of
+// them padding". Prose does not fail. Add a field, drop a pad, change a uint32
+// to a uint64, and the comment is simply wrong while C keeps writing to the
+// offsets the header promises: past the end of the Go object, or over the
+// neighbouring field.
+//
+// ⛔ That is not hypothetical in this fleet. go-macos/hotkey declared one
+// UniCharCount out-parameter four bytes wide instead of eight, and Carbon wrote
+// four bytes of zeros past it, onto the head of whatever Go had put next --
+// nine occurrences over three weeks, and a Go out-of-bounds write PANICS, so
+// nothing in the runtime could ever have named the writer. Only a signature or
+// a layout that disagrees with the header can do this, and only a check that
+// refuses to BUILD catches it before a person does.
+//
+// Two lines per struct: the first refuses a layout that grew, the second one
+// that shrank. A negative constant will not convert to uint, so either way the
+// package stops compiling and says which struct and by how much.
+const (
+	_ = uint(unsafe.Sizeof(audioStreamBasicDescription{}) - 40)
+	_ = uint(40 - unsafe.Sizeof(audioStreamBasicDescription{}))
+
+	_ = uint(unsafe.Sizeof(audioBuffer{}) - 16)
+	_ = uint(16 - unsafe.Sizeof(audioBuffer{}))
+
+	_ = uint(unsafe.Sizeof(audioBufferList{}) - 24)
+	_ = uint(24 - unsafe.Sizeof(audioBufferList{}))
+
+	_ = uint(unsafe.Sizeof(audioStreamPacketDescription{}) - 16)
+	_ = uint(16 - unsafe.Sizeof(audioStreamPacketDescription{}))
+
+	_ = uint(unsafe.Sizeof(smpteTime{}) - 24)
+	_ = uint(24 - unsafe.Sizeof(smpteTime{}))
+
+	_ = uint(unsafe.Sizeof(audioTimeStamp{}) - 64)
+	_ = uint(64 - unsafe.Sizeof(audioTimeStamp{}))
+
+	_ = uint(unsafe.Sizeof(audioQueueBuffer{}) - 56)
+	_ = uint(56 - unsafe.Sizeof(audioQueueBuffer{}))
+
+	// ⛔ AND THE OFFSETS OF THE THREE FIELDS THAT ACTUALLY CROSS, because a size
+	// alone does not pin a layout: swap two fields of the same width and every
+	// assertion above still passes while C and Go disagree about which is which.
+	//
+	// These three are the whole traffic. AudioDataByteSize is written by Go and
+	// read by the queue -- wrong, and the queue plays a wrong number of bytes.
+	// SampleTime and Flags are written by CoreAudio and read here -- wrong, and
+	// the playback clock reads a flag word as a timestamp, or a timestamp as
+	// flags, and neither looks like an error.
+	_ = uint(unsafe.Offsetof(audioQueueBuffer{}.AudioDataByteSize) - 16)
+	_ = uint(16 - unsafe.Offsetof(audioQueueBuffer{}.AudioDataByteSize))
+
+	_ = uint(unsafe.Offsetof(audioTimeStamp{}.SampleTime) - 0)
+	_ = uint(0 - unsafe.Offsetof(audioTimeStamp{}.SampleTime))
+
+	_ = uint(unsafe.Offsetof(audioTimeStamp{}.Flags) - 56)
+	_ = uint(56 - unsafe.Offsetof(audioTimeStamp{}.Flags))
+)
+
 // kAudioTimeStampSampleTimeValid asks AudioQueueGetCurrentTime for the field
 // this package's clock is built on.
 const kAudioTimeStampSampleTimeValid = 1 << 0
