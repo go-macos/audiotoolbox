@@ -1,10 +1,10 @@
 module github.com/go-macos/audiotoolbox
 
-go 1.27.1
+go 1.27.4
 
 require (
 	github.com/ebitengine/purego v0.11.3
-	github.com/go-avkit/avkit v0.19.2
+	github.com/go-avkit/avkit v0.20.2
 )
 
 require (
